@@ -7,21 +7,18 @@ import sys
 from websockets.exceptions import ConnectionClosed
 from urllib.parse import urlparse
 
-# Configure logging
+# Configure minimal logging to stdout only
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('boot_node.log')
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
 # Global set for registered nodes
 REGISTERED_NODES = set()
 
-# Get port from environment variable (Render assigns dynamically)
+# Get port from environment variable
 PORT = int(os.getenv('PORT', 9000))  # Fallback to 9000 for local testing
 
 # Validate WebSocket URI
@@ -34,7 +31,6 @@ def is_valid_uri(uri):
 
 async def boot_handler(websocket):
     client_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
-    logger.info(f"New connection from {client_address}")
     try:
         async for message in websocket:
             try:
@@ -43,21 +39,12 @@ async def boot_handler(websocket):
                 msg_data = msg.get('data')
 
                 if not msg_type or not isinstance(msg_data, str):
-                    logger.warning(f"Invalid message format from {client_address}")
-                    await websocket.send(json.dumps({
-                        'type': 'ERROR',
-                        'data': 'Invalid message format'
-                    }))
+                    # Silently ignore invalid messages
                     continue
 
                 if msg_type == 'REGISTER_PEER':
                     uri = msg_data.strip()
                     if not is_valid_uri(uri):
-                        logger.warning(f"Invalid URI from {client_address}: {uri}")
-                        await websocket.send(json.dumps({
-                            'type': 'ERROR',
-                            'data': 'Invalid WebSocket URI'
-                        }))
                         continue
 
                     REGISTERED_NODES.add(uri)
@@ -67,30 +54,15 @@ async def boot_handler(websocket):
                         'type': 'PEER_LIST',
                         'data': peer_list
                     }))
-                    logger.debug(f"Sent peer list to {client_address}: {peer_list}")
-
-                else:
-                    logger.warning(f"Unknown message type from {client_address}: {msg_type}")
-                    await websocket.send(json.dumps({
-                        'type': 'ERROR',
-                        'data': f'Unknown message type: {msg_type}'
-                    }))
 
             except json.JSONDecodeError:
-                logger.error(f"Failed to parse JSON from {client_address}")
-                await websocket.send(json.dumps({
-                    'type': 'ERROR',
-                    'data': 'Invalid JSON format'
-                }))
+                # Silently ignore invalid JSON
+                continue
             except Exception as e:
                 logger.error(f"Error processing message from {client_address}: {e}")
-                await websocket.send(json.dumps({
-                    'type': 'ERROR',
-                    'data': f'Server error: {str(e)}'
-                }))
 
     except ConnectionClosed:
-        logger.info(f"Connection closed by {client_address}")
+        pass  # Silently handle connection closure
     except Exception as e:
         logger.error(f"Unexpected error in connection from {client_address}: {e}")
 
@@ -100,7 +72,7 @@ async def main():
             boot_handler,
             "0.0.0.0",
             PORT,
-            max_size=1024 * 1024,  # 1MB max message size
+            max_size=1024 * 1024,
             ping_interval=30,
             ping_timeout=60
         )
