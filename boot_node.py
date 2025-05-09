@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import gzip
 from websockets.exceptions import ConnectionClosed
 from urllib.parse import urlparse
 
@@ -34,7 +35,16 @@ async def boot_handler(websocket):
     try:
         async for message in websocket:
             try:
-                msg = json.loads(message)
+                # Handle compressed or uncompressed messages
+                if isinstance(message, bytes):
+                    try:
+                        decompressed = gzip.decompress(message).decode('utf-8')
+                        msg = json.loads(decompressed)
+                    except gzip.BadGzipFile:
+                        logger.error(f"Invalid gzip data from {client_address}")
+                        continue
+                else:
+                    msg = json.loads(message)
                 msg_type = msg.get('type')
                 msg_data = msg.get('data')
 
@@ -50,10 +60,13 @@ async def boot_handler(websocket):
                     REGISTERED_NODES.add(uri)
                     logger.info(f"Registered peer: {uri} from {client_address}")
                     peer_list = list(REGISTERED_NODES - {uri})
-                    await websocket.send(json.dumps({
+                    # Send compressed response
+                    response = json.dumps({
                         'type': 'PEER_LIST',
                         'data': peer_list
-                    }))
+                    })
+                    compressed_response = gzip.compress(response.encode('utf-8'))
+                    await websocket.send(compressed_response)
 
             except json.JSONDecodeError:
                 # Silently ignore invalid JSON
