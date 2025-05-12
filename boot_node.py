@@ -7,7 +7,7 @@ import sys
 import gzip
 from websockets.exceptions import ConnectionClosed
 from urllib.parse import urlparse
-
+import ssl
 # Configure minimal logging to stdout only
 logging.basicConfig(
     level=logging.INFO,
@@ -80,18 +80,25 @@ async def boot_handler(websocket):
         logger.error(f"Unexpected error in connection from {client_address}: {e}")
 
 async def main():
-    try:
+     ssl_context = None
+     print("ENV:", os.getenv('ENV'))
+     if os.getenv('ENV') == 'development':
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain('./localhost+2.pem', './localhost+2-key.pem')  # Generated with mkcert
+     try:
         server = await websockets.serve(
             boot_handler,
             "0.0.0.0",
             PORT,
             max_size=1024 * 1024,
             ping_interval=30,
-            ping_timeout=60
+            ping_timeout=60,
+            ssl=ssl_context,
+            close_timeout=10,
         )
-        logger.info(f"Boot node running on port {PORT}")
+        logger.info(f"Boot node running on {'wss' if ssl_context else 'ws'}://0.0.0.0:{PORT}")
         await server.wait_closed()
-    except Exception as e:
+     except Exception as e:
         logger.error(f"Fatal error starting server: {e}")
         sys.exit(1)
 
