@@ -101,8 +101,9 @@ import os
 import ssl
 import gzip
 from urllib.parse import urlparse
-import stun  # ✅ Fixed import
+import stun  # Replacing pystun3
 
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -110,9 +111,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Globals
 REGISTERED_NODES = set()
 PORT = int(os.getenv('PORT', 9000))
 ENV = os.getenv('ENV', 'production')
+
 
 def is_valid_uri(uri):
     try:
@@ -120,6 +123,7 @@ def is_valid_uri(uri):
         return parsed.scheme == 'wss' and parsed.hostname and parsed.port
     except Exception:
         return False
+
 
 async def boot_handler(websocket):
     client_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
@@ -166,17 +170,30 @@ async def boot_handler(websocket):
     except Exception as e:
         logger.error(f"Unexpected error in connection from {client_address}: {e}")
 
-async def main():
-    try:
-        # Get external IP using STUN
-        nat_type, external_ip, external_port = stun.get_ip_info()
-        logger.info(f"NAT Type: {nat_type}, External IP: {external_ip}, Port: {external_port}")
 
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_context.load_cert_chain(
-            certfile=os.getenv('SSL_CERT_FILE', 'server.crt'),
-            keyfile=os.getenv('SSL_KEY_FILE', 'server.key')
-        )
+async def main():
+    # Use STUN to get external IP
+    try:
+        nat_type, external_ip, external_port = stun.get_ip_info(stun_host='stun.l.google.com', stun_port=19302)
+        logger.info(f"NAT Type: {nat_type}, External IP: {external_ip}, Port: {external_port}")
+    except Exception as e:
+        logger.warning(f"Could not determine external IP using STUN: {e}")
+
+    try:
+        ssl_context = None
+        if ENV == 'production':
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            certfile = os.getenv('SSL_CERT_FILE', 'server.crt')
+            keyfile = os.getenv('SSL_KEY_FILE', 'server.key')
+            try:
+                ssl_context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+                logger.info("SSL certificates loaded successfully")
+            except FileNotFoundError as e:
+                logger.warning(f"SSL certificate files not found: {e}. Falling back to default SSL context")
+                ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            except Exception as e:
+                logger.error(f"Error loading SSL certificates: {e}. Falling back to default SSL context")
+                ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
 
         server = await websockets.serve(
             boot_handler,
@@ -193,6 +210,7 @@ async def main():
     except Exception as e:
         logger.error(f"Fatal error starting server: {e}")
         raise
+
 
 if __name__ == "__main__":
     try:
