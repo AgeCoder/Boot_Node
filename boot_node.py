@@ -101,7 +101,7 @@ import os
 import ssl
 import gzip
 from urllib.parse import urlparse
-from pystun3 import get_ip_info
+import stun  # ✅ Fixed import
 
 logging.basicConfig(
     level=logging.INFO,
@@ -168,6 +168,10 @@ async def boot_handler(websocket):
 
 async def main():
     try:
+        # Get external IP using STUN
+        nat_type, external_ip, external_port = stun.get_ip_info()
+        logger.info(f"NAT Type: {nat_type}, External IP: {external_ip}, Port: {external_port}")
+
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(
             certfile=os.getenv('SSL_CERT_FILE', 'server.crt'),
