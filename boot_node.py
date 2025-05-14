@@ -179,50 +179,164 @@
 import asyncio
 import json
 import logging
-from aiohttp import web
+import gzip
+import base64
+import time
+from aiohttp import web, WSMsgType
+
+class SuppressBadRequestFilter(logging.Filter):
+    def filter(self, record):
+        return "connection rejected (400 Bad Request)" not in record.getMessage()
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+websockets_logger = logging.getLogger('aiohttp.web')
+websockets_logger.addFilter(SuppressBadRequestFilter())
 
-connected_clients = []
+PEERS = {}  # uri -> ws
+PEER_LAST_PING = {}
+PORT = 10000
+HTTP_PORT = 8080
+PING_INTERVAL = 30
+PING_TIMEOUT = 60
+
+async def health_check(request):
+    return web.Response(status=200, text="OK")
+
+async def ping_peers():
+    while True:
+        current_time = time.time()
+        dead_peers = []
+        for uri, ws in list(PEERS.items()):
+            if current_time - PEER_LAST_PING.get(uri, 0) > PING_TIMEOUT:
+                logger.warning(f"Peer {uri} timed out, marking for removal")
+                dead_peers.append(uri)
+                continue
+            try:
+                await ws.ping()
+                PEER_LAST_PING[uri] = current_time
+                logger.debug(f"Pinged peer {uri}")
+            except:
+                logger.warning(f"Failed to ping peer {uri}, marking for removal")
+                dead_peers.append(uri)
+        for uri in dead_peers:
+            if uri in PEERS:
+                try:
+                    await PEERS[uri].close()
+                except:
+                    pass
+                del PEERS[uri]
+                PEER_LAST_PING.pop(uri, None)
+                logger.info(f"Removed dead peer: {uri}")
+        await asyncio.sleep(PING_INTERVAL)
 
 async def websocket_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
-
-    logging.info("New WebSocket client connected.")
-    connected_clients.append(ws)
+    client_address = f"{request.remote}:{request.transport.get_extra_info('peerport')}"
+    peer_uri = None
+    PEER_LAST_PING[client_address] = time.time()
 
     try:
         async for msg in ws:
-            if msg.type == web.WSMsgType.TEXT:
-                data = msg.data
-                # Relay message to all *other* clients
-                for client in connected_clients:
-                    if client is not ws and not client.closed:
-                        await client.send_str(data)
-            elif msg.type == web.WSMsgType.ERROR:
-                logging.error(f"WebSocket connection closed with exception {ws.exception()}")
-    finally:
-        connected_clients.remove(ws)
-        logging.info("WebSocket client disconnected.")
+            if msg.type != WSMsgType.TEXT:
+                continue
+            PEER_LAST_PING[client_address] = time.time()
+            try:
+                data = json.loads(msg.data)
+                msg_type = data.get('type')
+                msg_data = data.get('data')
+                from_uri = data.get('from_uri', client_address)
 
+                if msg_type == "REGISTER_PEER":
+                    peer_uri = msg_data.strip()
+                    if not peer_uri.startswith('ws://'):
+                        logger.warning(f"Invalid peer URI from {client_address}: {peer_uri}")
+                        continue
+                    PEERS[peer_uri] = ws
+                    PEER_LAST_PING[peer_uri] = time.time()
+                    logger.info(f"Registered peer: {peer_uri}")
+                    await ws.send_json({
+                        "type": "PEER_LIST",
+                        "data": [uri for uri in PEERS.keys() if uri != peer_uri],
+                        "from": "boot_node"
+                    })
+
+                elif msg_type in ("offer", "answer", "candidate"):
+                    target_uri = data.get('target_uri')
+                    if target_uri in PEERS:
+                        await PEERS[target_uri].send_json(data)
+                    else:
+                        logger.warning(f"Target peer {target_uri} not found for {msg_type}")
+
+                elif msg_type == "RELAY_MESSAGE":
+                    target_uri = msg_data.get('target_uri')
+                    relayed_data = msg_data.get('data')
+                    if not target_uri or not relayed_data:
+                        logger.warning(f"Invalid RELAY_MESSAGE from {peer_uri}")
+                        continue
+                    if isinstance(relayed_data, str):
+                        try:
+                            relayed_data = base64.b64decode(relayed_data)
+                        except:
+                            logger.error(f"Failed to decode base64 data in RELAY_MESSAGE from {peer_uri}")
+                            continue
+                    if target_uri in PEERS:
+                        logger.debug(f"Relaying message from {peer_uri} to {target_uri}")
+                        await PEERS[target_uri].send_bytes(relayed_data)
+                    else:
+                        logger.warning(f"Target peer {target_uri} not found for relay")
+
+                else:
+                    compressed_msg = gzip.compress(json.dumps(data).encode('utf-8'))
+                    failed_peers = []
+                    for uri, peer in list(PEERS.items()):
+                        if uri != peer_uri:
+                            try:
+                                await peer.send_bytes(compressed_msg)
+                                logger.debug(f"Relayed {msg_type} to {uri}")
+                            except:
+                                logger.error(f"Failed to relay {msg_type} to {uri}")
+                                failed_peers.append(uri)
+                    for uri in failed_peers:
+                        if uri in PEERS:
+                            try:
+                                await PEERS[uri].close()
+                            except:
+                                pass
+                            del PEERS[uri]
+                            PEER_LAST_PING.pop(uri, None)
+                            logger.info(f"Removed peer {uri} due to relay failure")
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON from {client_address}: {e}")
+            except Exception as e:
+                logger.error(f"Error processing message from {client_address}: {e}")
+    except:
+        logger.info(f"Connection closed for {client_address}")
+    finally:
+        if peer_uri and peer_uri in PEERS:
+            try:
+                await PEERS[peer_uri].close()
+            except:
+                pass
+            del PEERS[peer_uri]
+            PEER_LAST_PING.pop(peer_uri, None)
+            logger.info(f"Removed peer: {peer_uri}")
+        PEER_LAST_PING.pop(client_address, None)
     return ws
 
-app = web.Application()
-app.router.add_get("/ws", websocket_handler)
-
-# Optional root endpoint for debug
-async def index(request):
-    return web.Response(text="✅ WebRTC Signaling Server is Running", content_type="text/plain")
-
-app.router.add_get("/", index)
+async def main():
+    app = web.Application()
+    app.add_routes([web.get('/health', health_check), web.get('/ws', websocket_handler)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"Boot node running on ws://0.0.0.0:{PORT}/ws")
+    logger.info(f"HTTP health check running on http://0.0.0.0:{PORT}/health")
+    asyncio.create_task(ping_peers())
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    web.run_app(app, port=10000)
-
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8080))
-    app = create_app()
-    web.run_app(app, host='0.0.0.0', port=port)
-
+    asyncio.run(main())
