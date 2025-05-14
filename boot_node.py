@@ -172,25 +172,54 @@
 
 # if __name__ == "__main__":
 #     asyncio.run(main())
-from aiohttp import web
-import asyncio
+# signaling_server.py (production-ready)
 
+from aiohttp import web, WSMsgType
+import asyncio
+import ssl
+import logging
+
+logging.basicConfig(level=logging.INFO)
 peers = set()
 
 async def websocket_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
+    logging.info("New client connected.")
     peers.add(ws)
 
-    async for msg in ws:
-        for peer in peers:
-            if peer != ws:
-                await peer.send_str(msg.data)
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                for peer in peers:
+                    if peer != ws:
+                        await peer.send_str(msg.data)
+            elif msg.type == WSMsgType.ERROR:
+                logging.error(f'WebSocket connection closed with exception {ws.exception()}')
+    finally:
+        peers.discard(ws)
+        logging.info("Client disconnected.")
 
-    peers.remove(ws)
     return ws
 
-app = web.Application()
-app.router.add_get('/ws', websocket_handler)
+async def on_shutdown(app):
+    for ws in peers:
+        await ws.close(code=1001, message='Server shutdown')
+    peers.clear()
 
-web.run_app(app, port=8080)
+def create_app():
+    app = web.Application()
+    app.router.add_get('/ws', websocket_handler)
+    app.on_shutdown.append(on_shutdown)
+    return app
+
+if __name__ == '__main__':
+    app = create_app()
+
+    # If deploying directly with HTTPS (not behind Nginx)
+    # ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    # ssl_context.load_cert_chain('path/to/fullchain.pem', 'path/to/privkey.pem')
+    # web.run_app(app, port=443, ssl_context=ssl_context)
+
+    # For HTTP or behind a reverse proxy
+    web.run_app(app, host='0.0.0.0', port=8080)
