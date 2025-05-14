@@ -3,91 +3,59 @@ import websockets
 import json
 import logging
 import gzip
-import sys
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PEERS = set()  # Store peer URIs
-PORT = 10000   # Render port
+PEERS = {}  # Store peer URI -> websocket
+PORT = 10000
 
 async def boot_handler(websocket):
     client_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
-    peer_uri = None  # Initialize peer_uri
+    peer_uri = None
     try:
         async for message in websocket:
             try:
-                # Handle compressed or uncompressed messages
                 if isinstance(message, bytes):
-                    try:
-                        decompressed = gzip.decompress(message).decode('utf-8')
-                        msg = json.loads(decompressed)
-                    except (gzip.BadGzipFile, UnicodeDecodeError) as e:
-                        logger.error(f"Invalid message format from {client_address}: {e}")
-                        continue
+                    msg = json.loads(gzip.decompress(message).decode('utf-8'))
                 else:
                     msg = json.loads(message)
 
                 msg_type = msg.get('type')
                 msg_data = msg.get('data')
 
-                if not msg_type or not isinstance(msg_data, str):
-                    logger.warning(f"Invalid message from {client_address}: missing type or data")
-                    continue
-
                 if msg_type == "REGISTER_PEER":
                     peer_uri = msg_data.strip()
-                    if not peer_uri.startswith(('ws://', 'wss://')):
+                    if not peer_uri.startswith('ws://'):
                         logger.warning(f"Invalid peer URI from {client_address}: {peer_uri}")
                         continue
-                    PEERS.add(peer_uri)
+                    PEERS[peer_uri] = websocket
                     logger.info(f"Registered peer: {peer_uri} from {client_address}")
-                    response = json.dumps({"type": "PEER_LIST", "data": list(PEERS - {peer_uri})})
-                    compressed_response = gzip.compress(response.encode('utf-8'))
-                    await websocket.send(compressed_response)
-                    logger.debug(f"Sent peer list to {peer_uri}")
+                    response = json.dumps({"type": "PEER_LIST", "data": list(PEERS.keys() - {peer_uri})})
+                    await websocket.send(gzip.compress(response.encode('utf-8')))
 
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON decode error from {client_address}: {e}")
-                continue
+                elif msg_type == "RELAY_MESSAGE":
+                    target_uri = msg.get('target_uri')
+                    if target_uri in PEERS:
+                        logger.debug(f"Relaying message from {peer_uri} to {target_uri}")
+                        await PEERS[target_uri].send(message)
+                    else:
+                        logger.warning(f"Target peer {target_uri} not found")
+
             except Exception as e:
                 logger.error(f"Error processing message from {client_address}: {e}")
                 continue
-    except websockets.exceptions.ConnectionClosed as e:
-        logger.info(f"Connection closed for {client_address}: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error in connection from {client_address}: {e}")
+    except websockets.exceptions.ConnectionClosed:
+        logger.info(f"Connection closed for {client_address}")
     finally:
         if peer_uri and peer_uri in PEERS:
-            PEERS.remove(peer_uri)
+            del PEERS[peer_uri]
             logger.info(f"Removed peer: {peer_uri}")
 
 async def main():
-    try:
-        server = await websockets.serve(
-            boot_handler,
-            "0.0.0.0",
-            PORT,
-            max_size=1024 * 1024,
-            ping_interval=30,
-            ping_timeout=60,
-            close_timeout=10
-        )
-        logger.info(f"Boot node running on ws://0.0.0.0:{PORT}")
-        await server.wait_closed()
-    except Exception as e:
-        logger.error(f"Fatal error starting server: {e}")
-        sys.exit(1)
+    server = await websockets.serve(boot_handler, "0.0.0.0", PORT, max_size=1024*1024)
+    logger.info(f"Boot node running on ws://0.0.0.0:{PORT}")
+    await server.wait_closed()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Boot node stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error in boot node: {e}")
-        sys.exit(1)
+    asyncio.run(main())
