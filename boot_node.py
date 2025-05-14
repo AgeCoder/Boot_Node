@@ -5,7 +5,6 @@ import logging
 import os
 import sys
 import gzip
-import requests
 from urllib.parse import urlparse
 from websockets.exceptions import ConnectionClosed
 
@@ -24,14 +23,6 @@ PORT = int(os.getenv('PORT', 9000))
 class BootNode:
     def __init__(self):
         self.registered_nodes = set()
-        self.public_ip = self.get_public_ip()
-
-    def get_public_ip(self) -> str:
-        try:
-            return requests.get('https://api.ipify.org').text
-        except Exception as e:
-            logger.error(f"Could not determine public IP: {e}")
-            return "127.0.0.1"
 
     def is_valid_uri(self, uri: str) -> bool:
         try:
@@ -96,7 +87,7 @@ class BootNode:
                 ping_timeout=60,
                 close_timeout=10
             )
-            logger.info(f"Bootnode running on wss://{self.public_ip}:{PORT}")
+            logger.info(f"Bootnode running on ws://0.0.0.0:{PORT}")
             await server.wait_closed()
         except Exception as e:
             logger.error(f"Fatal error starting bootnode: {e}")
