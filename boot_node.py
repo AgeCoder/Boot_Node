@@ -182,6 +182,8 @@ import logging
 import gzip
 import base64
 import time
+import selectors
+import platform
 from aiohttp import web, WSMsgType
 
 class SuppressBadRequestFilter(logging.Filter):
@@ -196,7 +198,6 @@ websockets_logger.addFilter(SuppressBadRequestFilter())
 PEERS = {}  # uri -> ws
 PEER_LAST_PING = {}
 PORT = 10000
-HTTP_PORT = 8080
 PING_INTERVAL = 30
 PING_TIMEOUT = 60
 
@@ -327,6 +328,10 @@ async def websocket_handler(request):
     return ws
 
 async def main():
+    if platform.system() == "Windows":
+        selector = selectors.SelectSelector()
+        asyncio.set_event_loop(asyncio.SelectorEventLoop(selector))
+
     app = web.Application()
     app.add_routes([web.get('/health', health_check), web.get('/ws', websocket_handler)])
     runner = web.AppRunner(app)
