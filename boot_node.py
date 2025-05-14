@@ -4,11 +4,10 @@ import json
 import logging
 import os
 import sys
-import gzip
-from urllib.parse import urlparse
 from websockets.exceptions import ConnectionClosed
+from urllib.parse import urlparse
 
-# Logging configuration
+# Configure minimal logging to stdout only
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -16,85 +15,78 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment variables
-ENV = os.getenv('ENV', 'development')
-PORT = int(os.getenv('PORT', 9000))  # Consistent port
+# Global set for registered nodes
+REGISTERED_NODES = set()
 
-class BootNode:
-    def __init__(self):
-        self.registered_nodes = set()
+# Get port from environment variable
+PORT = int(os.getenv('PORT', 9000))  # Fallback to 9000 for local testing
 
-    def is_valid_uri(self, uri: str) -> bool:
-        try:
-            parsed = urlparse(uri)
-            valid_schemes = ('wss',) if ENV == 'production' else ('ws', 'wss')
-            return (parsed.scheme in valid_schemes and parsed.hostname and parsed.port and
-                    parsed.hostname not in ['localhost', '127.0.0.1'])
-        except Exception:
-            return False
+# Validate WebSocket URI
+def is_valid_uri(uri):
+    try:
+        parsed = urlparse(uri)
+        return parsed.scheme in ('ws', 'wss') and parsed.hostname and parsed.port
+    except Exception:
+        return False
 
-    async def handle_connection(self, websocket):
-        client_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
-        try:
-            async for message in websocket:
-                try:
-                    # Decompress message if necessary
-                    if isinstance(message, bytes):
-                        msg = json.loads(gzip.decompress(message).decode('utf-8'))
-                    else:
-                        msg = json.loads(message)
+async def boot_handler(websocket):
+    client_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
+    try:
+        async for message in websocket:
+            try:
+                msg = json.loads(message)
+                msg_type = msg.get('type')
+                msg_data = msg.get('data')
 
-                    msg_type = msg.get('type')
-                    msg_data = msg.get('data')
-
-                    if msg_type == 'REGISTER_PEER' and isinstance(msg_data, str):
-                        uri = msg_data.strip()
-                        parsed = urlparse(uri)
-                        # Replace local IPs with client's public IP
-                        if parsed.hostname in ['localhost', '127.0.0.1']:
-                            uri = f"{parsed.scheme}://{websocket.remote_address[0]}:{parsed.port}"
-                        if ENV == 'production' and not uri.startswith('wss://'):
-                            uri = f"wss://{parsed.hostname}:{parsed.port}"
-                        if not self.is_valid_uri(uri):
-                            logger.warning(f"Invalid URI from {client_address}: {uri}")
-                            continue
-
-                        self.registered_nodes.add(uri)
-                        logger.info(f"Registered peer: {uri} from {client_address}")
-
-                        # Send peer list (excluding the registering peer)
-                        peer_list = list(self.registered_nodes - {uri})
-                        response = json.dumps({'type': 'PEER_LIST', 'data': peer_list})
-                        await websocket.send(gzip.compress(response.encode('utf-8')))
-                    else:
-                        logger.warning(f"Unknown message type or invalid data from {client_address}: {msg}")
-                except (json.JSONDecodeError, gzip.BadGzipFile) as e:
-                    logger.error(f"Invalid message from {client_address}: {e}")
+                if not msg_type or not isinstance(msg_data, str):
+                    # Silently ignore invalid messages
                     continue
-                except Exception as e:
-                    logger.error(f"Error processing message from {client_address}: {e}")
-        except ConnectionClosed as e:
-            logger.info(f"Connection closed from {client_address}: {e}")
-        except Exception as e:
-            logger.error(f"Connection error from {client_address}: {e}")
 
-    async def start(self):
-        try:
-            server = await websockets.serve(
-                self.handle_connection,
-                "0.0.0.0",
-                PORT,
-                max_size=1024 * 1024,
-                ping_interval=30,
-                ping_timeout=60,
-                close_timeout=10
-            )
-            logger.info(f"Bootnode running on ws://0.0.0.0:{PORT}")
-            await server.wait_closed()
-        except Exception as e:
-            logger.error(f"Fatal error starting bootnode: {e}")
-            sys.exit(1)
+                if msg_type == 'REGISTER_PEER':
+                    uri = msg_data.strip()
+                    if not is_valid_uri(uri):
+                        continue
+
+                    REGISTERED_NODES.add(uri)
+                    logger.info(f"Registered peer: {uri} from {client_address}")
+                    peer_list = list(REGISTERED_NODES - {uri})
+                    await websocket.send(json.dumps({
+                        'type': 'PEER_LIST',
+                        'data': peer_list
+                    }))
+
+            except json.JSONDecodeError:
+                # Silently ignore invalid JSON
+                continue
+            except Exception as e:
+                logger.error(f"Error processing message from {client_address}: {e}")
+
+    except ConnectionClosed:
+        pass  # Silently handle connection closure
+    except Exception as e:
+        logger.error(f"Unexpected error in connection from {client_address}: {e}")
+
+async def main():
+    try:
+        server = await websockets.serve(
+            boot_handler,
+            "0.0.0.0",
+            PORT,
+            max_size=1024 * 1024,
+            ping_interval=30,
+            ping_timeout=60
+        )
+        logger.info(f"Boot node running on port {PORT}")
+        await server.wait_closed()
+    except Exception as e:
+        logger.error(f"Fatal error starting server: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    bootnode = BootNode()
-    asyncio.run(bootnode.start())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Boot node stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error in boot node: {e}")
+        sys.exit(1)
