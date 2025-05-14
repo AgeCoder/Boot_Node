@@ -202,6 +202,7 @@ PING_INTERVAL = 30
 PING_TIMEOUT = 60
 
 async def health_check(request):
+    logger.debug(f"Health check received from {request.remote}")
     return web.Response(status=200, text="OK")
 
 async def ping_peers():
@@ -237,6 +238,7 @@ async def websocket_handler(request):
     client_address = f"{request.remote}:{request.transport.get_extra_info('peerport')}"
     peer_uri = None
     PEER_LAST_PING[client_address] = time.time()
+    logger.info(f"New WebSocket connection from {client_address}")
 
     try:
         async for msg in ws:
@@ -266,6 +268,7 @@ async def websocket_handler(request):
                 elif msg_type in ("offer", "answer", "candidate"):
                     target_uri = data.get('target_uri')
                     if target_uri in PEERS:
+                        logger.debug(f"Forwarding {msg_type} to {target_uri}")
                         await PEERS[target_uri].send_json(data)
                     else:
                         logger.warning(f"Target peer {target_uri} not found for {msg_type}")
