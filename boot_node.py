@@ -86,21 +86,21 @@ class BootNode:
             logger.error(f"Connection error from {client_address}: {e}")
 
     async def start(self):
-    try:
-        server = await websockets.serve(
-            self.handle_connection,
-            "0.0.0.0",
-            PORT,
-            max_size=1024 * 1024,
-            ping_interval=30,
-            ping_timeout=60,
-            close_timeout=10
-        )
-        logger.info(f"Bootnode running on wss://{self.public_ip}:{PORT}")
-        await server.wait_closed()
-    except Exception as e:
-        logger.error(f"Fatal error starting bootnode: {e}")
-        sys.exit(1)
+        try:
+            server = await websockets.serve(
+                self.handle_connection,
+                "0.0.0.0",
+                PORT,
+                max_size=1024 * 1024,
+                ping_interval=30,
+                ping_timeout=60,
+                close_timeout=10
+            )
+            logger.info(f"Bootnode running on wss://{self.public_ip}:{PORT}")
+            await server.wait_closed()
+        except Exception as e:
+            logger.error(f"Fatal error starting bootnode: {e}")
+            sys.exit(1)
 
 if __name__ == "__main__":
     bootnode = BootNode()
