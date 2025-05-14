@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Environment variables
 ENV = os.getenv('ENV', 'development')
-PORT = int(os.getenv('PORT', 9000))
+PORT = int(os.getenv('PORT', 9000))  # Consistent port
 
 class BootNode:
     def __init__(self):
@@ -66,13 +66,15 @@ class BootNode:
                         peer_list = list(self.registered_nodes - {uri})
                         response = json.dumps({'type': 'PEER_LIST', 'data': peer_list})
                         await websocket.send(gzip.compress(response.encode('utf-8')))
-                except (json.JSONDecodeError, gzip.BadGzipFile):
-                    logger.error(f"Invalid message from {client_address}")
+                    else:
+                        logger.warning(f"Unknown message type or invalid data from {client_address}: {msg}")
+                except (json.JSONDecodeError, gzip.BadGzipFile) as e:
+                    logger.error(f"Invalid message from {client_address}: {e}")
                     continue
                 except Exception as e:
                     logger.error(f"Error processing message from {client_address}: {e}")
-        except ConnectionClosed:
-            logger.info(f"Connection closed from {client_address}")
+        except ConnectionClosed as e:
+            logger.info(f"Connection closed from {client_address}: {e}")
         except Exception as e:
             logger.error(f"Connection error from {client_address}: {e}")
 
