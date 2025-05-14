@@ -176,43 +176,50 @@
 
 # signaling_server.py for Render deployment
 
-from aiohttp import web, WSMsgType
-import os
+import asyncio
+import json
 import logging
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
-peers = set()
+
+connected_clients = []
 
 async def websocket_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
+
     logging.info("New WebSocket client connected.")
-    peers.add(ws)
+    connected_clients.append(ws)
 
     try:
         async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                for peer in peers:
-                    if peer != ws:
-                        await peer.send_str(msg.data)
-            elif msg.type == WSMsgType.ERROR:
-                logging.error(f'Connection error: {ws.exception()}')
+            if msg.type == web.WSMsgType.TEXT:
+                data = msg.data
+                # Relay message to all *other* clients
+                for client in connected_clients:
+                    if client is not ws and not client.closed:
+                        await client.send_str(data)
+            elif msg.type == web.WSMsgType.ERROR:
+                logging.error(f"WebSocket connection closed with exception {ws.exception()}")
     finally:
-        peers.discard(ws)
+        connected_clients.remove(ws)
         logging.info("WebSocket client disconnected.")
 
     return ws
 
-async def on_shutdown(app):
-    for ws in peers:
-        await ws.close()
-    peers.clear()
+app = web.Application()
+app.router.add_get("/ws", websocket_handler)
 
-def create_app():
-    app = web.Application()
-    app.router.add_get('/ws', websocket_handler)
-    app.on_shutdown.append(on_shutdown)
-    return app
+# Optional root endpoint for debug
+async def index(request):
+    return web.Response(text="✅ WebRTC Signaling Server is Running", content_type="text/plain")
+
+app.router.add_get("/", index)
+
+if __name__ == "__main__":
+    web.run_app(app, port=10000)
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
