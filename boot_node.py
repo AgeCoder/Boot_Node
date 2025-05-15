@@ -67,12 +67,40 @@ async def ping_peers():
                     await PEERS[uri].close()
                 except:
                     pass
-                del PEERS[uri]
+                if uri in PEERS:
+                    del PEERS[uri]
                 PEER_ADDRESSES.pop(uri, None)
                 PEER_LAST_PING.pop(uri, None)
                 logger.info(f"Removed dead peer: {uri}")
         await asyncio.sleep(PING_INTERVAL)
-
+async def notify_peers(new_peer_uri):
+    """Notify all peers of a new peer connection."""
+    response = {
+        "type": "PEER_LIST",
+        "data": [new_peer_uri],
+        "from": "boot_node"
+    }
+    compressed_response = gzip.compress(json.dumps(response).encode('utf-8'))
+    failed_peers = []
+    for uri, peer in list(PEERS.items()):
+        if uri != new_peer_uri:
+            try:
+                await peer.send(compressed_response)
+                logger.info(f"Notified {uri} of new peer {new_peer_uri}")
+            except Exception as e:
+                logger.error(f"Failed to notify {uri}: {e}")
+                failed_peers.append(uri)
+    for uri in failed_peers:
+        if uri in PEERS:
+            try:
+                await PEERS[uri].close()
+            except:
+                pass
+            if uri in PEERS:
+                del PEERS[uri]
+            PEER_ADDRESSES.pop(uri, None)
+            PEER_LAST_PING.pop(uri, None)
+            logger.info(f"Removed peer {uri} due to notification failure")
 async def boot_handler(websocket):
     client_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
     peer_uri = None
@@ -97,6 +125,7 @@ async def boot_handler(websocket):
                     PEER_ADDRESSES[peer_uri] = client_address
                     PEER_LAST_PING[peer_uri] = time.time()
                     logger.info(f"Registered peer: {peer_uri} from {client_address}")
+                    # Send peer list to the new peer
                     response = {
                         "type": "PEER_LIST",
                         "data": [uri for uri in PEERS.keys() if uri != peer_uri],
@@ -104,6 +133,8 @@ async def boot_handler(websocket):
                     }
                     compressed_response = gzip.compress(json.dumps(response).encode('utf-8'))
                     await websocket.send(compressed_response)
+                    # Notify all other peers of the new peer
+                    await notify_peers(peer_uri)
 
                 elif msg_type == "RELAY_MESSAGE":
                     target_uri = msg_data.get('target_uri')
@@ -114,7 +145,6 @@ async def boot_handler(websocket):
                         logger.warning(f"Invalid RELAY_MESSAGE from {client_address}: missing target_uri or data")
                         continue
                         
-                    # Decode base64 data if it's a string
                     if isinstance(relayed_data, str):
                         try:
                             decoded_data = base64.b64decode(relayed_data)
@@ -127,12 +157,10 @@ async def boot_handler(websocket):
                         
                     if target_uri in PEERS:
                         try:
-                            # Send the decoded data to the target peer
                             await PEERS[target_uri].send(decoded_data)
                             logger.info(f"Relayed message from {sender} to {target_uri}")
                         except Exception as e:
                             logger.error(f"Failed to relay message to {target_uri}: {e}")
-                            # Send relay failure response to original sender
                             if peer_uri:
                                 try:
                                     failure_msg = {
@@ -145,7 +173,6 @@ async def boot_handler(websocket):
                                     pass
                     else:
                         logger.warning(f"Target peer {target_uri} not found for relay")
-                        # Inform sender that target peer is not connected
                         if peer_uri:
                             try:
                                 not_found_msg = {
@@ -157,7 +184,6 @@ async def boot_handler(websocket):
                             except Exception:
                                 pass
 
-                # For non-relay messages, just broadcast to all peers
                 else:
                     compressed_msg = gzip.compress(json.dumps(msg).encode('utf-8'))
                     failed_peers = []
@@ -175,7 +201,8 @@ async def boot_handler(websocket):
                                 await PEERS[uri].close()
                             except:
                                 pass
-                            del PEERS[uri]
+                            if uri in PEERS:
+                                del PEERS[uri]
                             PEER_ADDRESSES.pop(uri, None)
                             PEER_LAST_PING.pop(uri, None)
                             logger.info(f"Removed peer {uri} due to relay failure")
@@ -185,7 +212,7 @@ async def boot_handler(websocket):
             except Exception as e:
                 logger.error(f"Error processing message from {client_address}: {e}")
     except websockets.exceptions.ConnectionClosed:
-        pass  # Suppressed logging due to filter
+        pass
     except Exception as e:
         logger.error(f"Unexpected error in boot_handler for {client_address}: {e}")
     finally:
@@ -194,13 +221,12 @@ async def boot_handler(websocket):
                 await PEERS[peer_uri].close()
             except:
                 pass
-            if peer_uri:
+            if peer_uri in PEERS:
                 del PEERS[peer_uri]
             PEER_ADDRESSES.pop(peer_uri, None)
             PEER_LAST_PING.pop(peer_uri, None)
             logger.info(f"Cleaned up peer: {peer_uri}")
         PEER_LAST_PING.pop(client_address, None)
-
 async def main():
     # Setup HTTP health check endpoint
     app = web.Application()
