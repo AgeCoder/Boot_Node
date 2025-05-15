@@ -4,6 +4,7 @@ import logging
 import gzip
 import base64
 import time
+import signal
 from aiohttp import web
 from pubnub.pnconfiguration import PNConfiguration
 from pubnub.pubnub_asyncio import PubNubAsyncio
@@ -13,11 +14,16 @@ class SuppressBadRequestFilter(logging.Filter):
     def filter(self, record):
         return not ("connection rejected (400 Bad Request)" in record.getMessage())
 
+# Configure logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 websockets_logger = logging.getLogger('pubnub')
 websockets_logger.addFilter(SuppressBadRequestFilter())
 
+# Global variables
 PEERS = {}  # uri -> node_id
 PEER_LAST_PING = {}
 PORT = 10000
@@ -26,20 +32,26 @@ PING_INTERVAL = 60
 PING_TIMEOUT = 120
 BOOT_CHANNEL = "boot-channel"
 
-# Configure PubNub (add your keys later)
+# Configure PubNub (replace with your actual keys)
 pnconfig = PNConfiguration()
-pnconfig.subscribe_key = "your-subscribe-key"  # Add your PubNub Subscribe Key
-pnconfig.publish_key = "your-publish-key"      # Add your PubNub Publish Key
+pnconfig.subscribe_key = "sub-c-f65aee46-02ff-4296-ac70-8c545d222ed8"
+pnconfig.publish_key = "pub-c-fffb4e62-2213-45e6-b9bf-1ed03312d268"
 pnconfig.user_id = "boot-node"
 pubnub = PubNubAsyncio(pnconfig)
 
 class MySubscribeCallback(SubscribeCallback):
     async def message(self, pubnub, event):
         try:
-            msg = json.loads(gzip.decompress(base64.b64decode(event.message)).decode('utf-8'))
+            decoded_data = base64.b64decode(event.message)
+            decompressed_data = gzip.decompress(decoded_data)
+            msg = json.loads(decompressed_data.decode('utf-8'))
             msg_type = msg.get('type')
             msg_data = msg.get('data')
             client_address = event.publisher
+
+            if not isinstance(msg, dict) or 'type' not in msg or 'data' not in msg:
+                logger.warning(f"Malformed message from {client_address}: {msg}")
+                return
 
             if msg_type == "REGISTER_PEER":
                 peer_uri = msg_data.strip()
@@ -54,9 +66,9 @@ class MySubscribeCallback(SubscribeCallback):
                     "data": [uri for uri in PEERS.keys() if uri != peer_uri],
                     "from": "boot_node"
                 }
-                await pubnub.publish().channel(BOOT_CHANNEL).message(
-                    base64.b64encode(gzip.compress(json.dumps(response).encode('utf-8'))).decode('utf-8')
-                ).pn_async()
+                compressed_response = gzip.compress(json.dumps(response).encode('utf-8'))
+                encoded_response = base64.b64encode(compressed_response).decode('utf-8')
+                await pubnub.publish().channel(BOOT_CHANNEL).message(encoded_response).pn_async()
 
             elif msg_type == "RELAY_MESSAGE":
                 target_uri = msg_data.get('target_uri')
@@ -72,9 +84,8 @@ class MySubscribeCallback(SubscribeCallback):
                         return
                 if target_uri in PEERS:
                     target_channel = f"peer-{PEERS[target_uri]}"
-                    await pubnub.publish().channel(target_channel).message(
-                        base64.b64encode(relayed_data).decode('utf-8')
-                    ).pn_async()
+                    encoded_data = base64.b64encode(relayed_data).decode('utf-8')
+                    await pubnub.publish().channel(target_channel).message(encoded_data).pn_async()
                     logger.debug(f"Relayed message to {target_uri} on {target_channel}")
                 else:
                     logger.warning(f"Target peer {target_uri} not found for relay")
@@ -87,9 +98,8 @@ class MySubscribeCallback(SubscribeCallback):
                 for uri, node_id in list(PEERS.items()):
                     if uri != msg_data.get('peer_uri'):
                         target_channel = f"peer-{node_id}"
-                        await pubnub.publish().channel(target_channel).message(
-                            base64.b64encode(compressed_msg).decode('utf-8')
-                        ).pn_async()
+                        encoded_msg = base64.b64encode(compressed_msg).decode('utf-8')
+                        await pubnub.publish().channel(target_channel).message(encoded_msg).pn_async()
                         logger.debug(f"Relayed message to {uri} on {target_channel}")
 
         except json.JSONDecodeError as e:
@@ -106,9 +116,13 @@ async def ping_peers():
                 dead_peers.append(uri)
                 continue
             try:
-                await pubnub.publish().channel(f"peer-{node_id}").message(
-                    base64.b64encode(gzip.compress(json.dumps({"type": "PING", "data": None}).encode('utf-8'))).decode('utf-8')
-                ).pn_async()
+                ping_message = {
+                    "type": "PING",
+                    "data": None
+                }
+                compressed_ping = gzip.compress(json.dumps(ping_message).encode('utf-8'))
+                encoded_ping = base64.b64encode(compressed_ping).decode('utf-8')
+                await pubnub.publish().channel(f"peer-{node_id}").message(encoded_ping).pn_async()
                 PEER_LAST_PING[uri] = current_time
             except Exception:
                 dead_peers.append(uri)
@@ -120,8 +134,16 @@ async def ping_peers():
         await asyncio.sleep(PING_INTERVAL)
 
 async def health_check(request):
-    """Handle Render health checks."""
+    """Handle health checks."""
     return web.Response(status=200, text="OK")
+
+async def shutdown(app):
+    await pubnub.stop()
+    await app['runner'].cleanup()
+
+def setup_signal_handlers(loop, app):
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(app)))
 
 async def main():
     # Subscribe to boot channel
@@ -144,5 +166,12 @@ async def main():
     # Keep the application running
     await asyncio.Event().wait()
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("Shutting down...")
+    finally:
+        loop.close()
