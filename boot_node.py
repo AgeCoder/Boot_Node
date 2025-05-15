@@ -24,6 +24,26 @@ HTTP_PORT = 8080
 PING_INTERVAL = 60
 PING_TIMEOUT = 120
 
+# Custom WebSocket server that can handle HTTP requests
+class CustomWebSocketServer(websockets.WebSocketServerProtocol):
+    async def process_request(self, path, request_headers):
+        # Handle HTTP requests (including HEAD) sent to the WebSocket port
+        if request_headers.get("Upgrade", "").lower() != "websocket":
+            # This is not a WebSocket request, it's a regular HTTP request
+            logger.info(f"Received HTTP request to WebSocket port: {request_headers.get('method', 'UNKNOWN')} {path}")
+            
+            # Return a simple HTTP response
+            return (
+                200,
+                [
+                    ("Content-Type", "text/plain"),
+                    ("Server", "WebSocket/Boot Node")
+                ],
+                b"WebSocket server running. Please use a WebSocket client to connect."
+            )
+        # For WebSocket requests, return None to continue with the WebSocket handshake
+        return None
+
 async def health_check(request):
     """Handle Render health checks."""
     return web.Response(status=200, text="OK")
@@ -38,7 +58,7 @@ async def ping_peers():
                 continue
             try:
                 await ws.ping()
-                PEER_LAST_PING[uri] = time.time()
+                PEER_LAST_PING[uri] = current_time
             except Exception:
                 dead_peers.append(uri)
         for uri in dead_peers:
@@ -52,22 +72,6 @@ async def ping_peers():
                 PEER_LAST_PING.pop(uri, None)
                 logger.info(f"Removed dead peer: {uri}")
         await asyncio.sleep(PING_INTERVAL)
-
-async def process_request(path, headers):
-    """
-    Intercept HTTP requests before WebSocket handshake.
-    Handle HEAD or non-WebSocket GET requests for health checks.
-    """
-    if headers.get("Upgrade", "").lower() != "websocket":
-        # Handle HEAD or GET requests that aren't WebSocket handshakes
-        if headers.get("REQUEST_METHOD") in ("HEAD", "GET"):
-            logger.info(f"Received HTTP {headers.get('REQUEST_METHOD')} request on WebSocket port, responding with 200 OK")
-            return web.Response(status=200, text="OK")
-        # Reject other HTTP methods
-        logger.warning(f"Received unsupported HTTP method {headers.get('REQUEST_METHOD')} on WebSocket port")
-        return web.Response(status=400, text="Bad Request")
-    # Let WebSocket handshake proceed
-    return None
 
 async def boot_handler(websocket):
     client_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
@@ -177,7 +181,7 @@ async def boot_handler(websocket):
                             logger.info(f"Removed peer {uri} due to relay failure")
 
             except json.JSONDecodeError as e:
-                 logger.error(f"Invalid JSON from {client_address}: {e}")
+                logger.error(f"Invalid JSON from {client_address}: {e}")
             except Exception as e:
                 logger.error(f"Error processing message from {client_address}: {e}")
     except websockets.exceptions.ConnectionClosed:
@@ -197,6 +201,7 @@ async def boot_handler(websocket):
         PEER_LAST_PING.pop(client_address, None)
 
 async def main():
+    # Setup HTTP health check endpoint
     app = web.Application()
     app.add_routes([web.get('/health', health_check)])
     runner = web.AppRunner(app)
@@ -205,7 +210,10 @@ async def main():
     await http_site.start()
     logger.info(f"HTTP health check running on http://0.0.0.0:{HTTP_PORT}/health")
 
+    # Start ping task
     asyncio.create_task(ping_peers())
+    
+    # Create the WebSocket server with custom protocol handler
     server = await websockets.serve(
         boot_handler,
         "0.0.0.0",
@@ -213,8 +221,9 @@ async def main():
         max_size=1024*1024,
         ping_interval=PING_INTERVAL,
         ping_timeout=PING_TIMEOUT,
-        process_request=process_request  # Add custom request processor
+        create_protocol=CustomWebSocketServer
     )
+    
     logger.info(f"Boot node running on ws://0.0.0.0:{PORT}")
     await server.wait_closed()
 
