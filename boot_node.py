@@ -7,7 +7,7 @@ import base64
 import time
 from aiohttp import web
 
-cclass SuppressBadRequestFilter(logging.Filter):
+class SuppressBadRequestFilter(logging.Filter):
     def filter(self, record):
         return not ("connection rejected (400 Bad Request)" in record.getMessage() or "connection closed" in record.getMessage())
 
