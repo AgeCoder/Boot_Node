@@ -194,7 +194,8 @@ async def boot_handler(websocket):
                 await PEERS[peer_uri].close()
             except:
                 pass
-            del PEERS[peer_uri]
+            if peer_uri:
+                del PEERS[peer_uri]
             PEER_ADDRESSES.pop(peer_uri, None)
             PEER_LAST_PING.pop(peer_uri, None)
             logger.info(f"Cleaned up peer: {peer_uri}")
