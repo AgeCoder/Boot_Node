@@ -7,9 +7,9 @@ import base64
 import time
 from aiohttp import web
 
-class SuppressBadRequestFilter(logging.Filter):
+cclass SuppressBadRequestFilter(logging.Filter):
     def filter(self, record):
-        return "connection rejected (400 Bad Request)" not in record.getMessage()
+        return not ("connection rejected (400 Bad Request)" in record.getMessage() or "connection closed" in record.getMessage())
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -20,11 +20,8 @@ PEERS = {}  # uri -> websocket
 PEER_LAST_PING = {}
 PORT = 10000
 HTTP_PORT = 8080
-PING_INTERVAL = 30
-PING_TIMEOUT = 60
-
-async def health_check(request):
-    return web.Response(status=200, text="OK")
+PING_INTERVAL = 60  # Increased to reduce load
+PING_TIMEOUT = 120  # Adjusted for stability
 
 async def ping_peers():
     while True:
